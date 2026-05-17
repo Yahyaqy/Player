@@ -5,51 +5,72 @@ from urllib.parse import urlparse, parse_qs
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        # 1. تحليل الرابط القادم لاستخراج رابط صفحة فيلم موقع أهواك
         query_components = parse_qs(urlparse(self.path).query)
         
-        # إذا لم يقم المستخدم بتمرير رابط الفيلم بعد علامة ?url=
         if 'url' not in query_components:
             self.send_response(400)
             self.send_header('Content-type', 'text/plain; charset=utf-8')
             self.end_headers()
-            self.wfile.write("خطأ: يرجى إضافة رابط صفحة الفيلم. مثال:\n?url=https://yam.ahwaktv.net/...".encode('utf-8'))
+            self.wfile.write("خطأ: يرجى إضافة رابط صفحة الفيلم من موقع أهواك.".encode('utf-8'))
             return
             
         target_url = query_components['url'][0]
         
-        # إرسال ترويسة (Headers) متوافقة مع سيرفر أهواك لمنع الحظر
+        # استخراج الـ vid من الرابط المرسل
+        vid = None
+        vid_match = re.search(r'vid=([a-zA-Z0-9]+)', target_url)
+        if vid_match:
+            vid = vid_match.group(1)
+            
         headers = {
             "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
-            "Referer": "https://ahwaktv.net/"
+            "Referer": "https://ahwaktv.net/",
+            "X-Requested-With": "XMLHttpRequest"
         }
         
         try:
-            # 2. قراءة كود صفحة المشغل برمجياً في الخلفية
-            response = requests.get(target_url, headers=headers, timeout=10)
+            session = requests.Session()
+            
+            # الخطوة 1: إذا نجحنا في استخراج الـ vid، نضرب الـ API المباشر للسيرفر لتوليد الروابط
+            if vid:
+                # محاكاة الطلب الخلفي الذي يطلبه المتصفح لجلب ملف الـ m3u8
+                api_url = f"https://yam.ahwaktv.net/player/ajax_sources.php?id={vid}"
+                api_response = session.get(api_url, headers=headers, timeout=8)
+                
+                # البحث عن رابط m3u8 داخل رد الـ API
+                match = re.search(r'(https:[^\s"\']+\.m3u8[^\s"\']*)', api_response.text)
+                if not match:
+                    match = re.search(r'(https:\\\\/[^\s"\']+\.m3u8[^\s"\']*)', api_response.text)
+                    
+                if match:
+                    video_url = match.group(0).replace('\\/', '/')
+                    self.redirect_to(video_url)
+                    return
+
+            # الخطوة 2: كخطة بديلة (Fallback) إذا لم نجد الـ vid، نقرأ الصفحة كاملة ونفتش فيها
+            response = session.get(target_url, headers=headers, timeout=10)
             html = response.text
             
-            # 3. قنص رابط الـ m3u8 الحي بالتوكن الجديد (الخاص بسيرفر 1vid أو السيرفرات المشابهة)
-            match = re.search(r'https://[^\s"\']+\.m3u8[^\s"\']*', html)
-            
-            if match:
-                video_direct_url = match.group(0)
+            match = re.search(r'(https:[^\s"\']+\.m3u8[^\s"\']*)', html)
+            if not match:
+                match = re.search(r'(https:\\\\/[^\s"\']+\.m3u8[^\s"\']*)', html)
                 
-                # 4. توجيه المشغل الخارجي فوراً لرابط الفيديو المباشر المستخرج
-                self.send_response(302)
-                self.send_header('Location', video_direct_url)
-                self.send_header('Access-Control-Allow-Origin', '*') # لضمان عمله على كافة التطبيقات دون قيود
-                self.end_headers()
+            if match:
+                video_url = match.group(0).replace('\\/', '/')
+                self.redirect_to(video_url)
                 return
             else:
-                # في حال لم يجد السكريبت رابط البث داخل الصفحة
                 self.send_response(404)
                 self.send_header('Content-type', 'text/plain; charset=utf-8')
                 self.end_headers()
-                self.wfile.write("عذراً، لم يتم العثور على رابط m3u8 نشط في هذه الصفحة.".encode('utf-8'))
-                return
+                self.wfile.write("عذراً، لم نتمكن من قنص الرابط المتغير. قد تكون الحماية قد حدثت.".encode('utf-8'))
+                
         except:
-            # في حال حدوث مشكلة في الاتصال بالسيرفر الأصلي
             self.send_response(500)
             self.end_headers()
-            return
+
+    def redirect_to(self, url):
+        self.send_response(302)
+        self.send_header('Location', url)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
