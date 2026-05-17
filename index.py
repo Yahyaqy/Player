@@ -1,43 +1,55 @@
 from http.server import BaseHTTPRequestHandler
 import requests
 import re
+from urllib.parse import urlparse, parse_qs
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        # 1. رابط صفحة البث الأصلية لقناة MBC 1
-        source_url = "https://play.arab-stream.live/p/mbc-1-ksa.html?m=1"
+        # 1. تحليل الرابط القادم لاستخراج رابط صفحة فيلم موقع أهواك
+        query_components = parse_qs(urlparse(self.path).query)
         
-        # إرسال مستخدم وهمي (User-Agent) متوافق لجعل السيرفر يظن أنه متصفح حقيقي
+        # إذا لم يقم المستخدم بتمرير رابط الفيلم بعد علامة ?url=
+        if 'url' not in query_components:
+            self.send_response(400)
+            self.send_header('Content-type', 'text/plain; charset=utf-8')
+            self.end_headers()
+            self.wfile.write("خطأ: يرجى إضافة رابط صفحة الفيلم. مثال:\n?url=https://yam.ahwaktv.net/...".encode('utf-8'))
+            return
+            
+        target_url = query_components['url'][0]
+        
+        # إرسال ترويسة (Headers) متوافقة مع سيرفر أهواك لمنع الحظر
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://play.arab-stream.live/"
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+            "Referer": "https://ahwaktv.net/"
         }
         
         try:
-            # 2. طلب محتوى الصفحة برمجياً
-            response = requests.get(source_url, headers=headers, timeout=7)
+            # 2. قراءة كود صفحة المشغل برمجياً في الخلفية
+            response = requests.get(target_url, headers=headers, timeout=10)
             html = response.text
             
-            # 3. استخدام الـ Regex للبحث عن رابط الـ m3u8 الذي يحتوي على التوكن المتغير
-            # الكود يبحث عن أي رابط يبدأ بـ https وينتهي بـ index.m3u8
-            match = re.search(r'https://[^\s"\']+/index\.m3u8', html)
+            # 3. قنص رابط الـ m3u8 الحي بالتوكن الجديد (الخاص بسيرفر 1vid أو السيرفرات المشابهة)
+            match = re.search(r'https://[^\s"\']+\.m3u8[^\s"\']*', html)
             
             if match:
-                real_stream_url = match.group(0)
+                video_direct_url = match.group(0)
                 
-                # 4. إعادة توجيه ذكية (302 Redirect) للمشغل نحو الرابط الحي بالتوكن الجديد
+                # 4. توجيه المشغل الخارجي فوراً لرابط الفيديو المباشر المستخرج
                 self.send_response(302)
-                self.send_header('Location', real_stream_url)
-                # السماح لجميع المشغلات بالوصول بدون قيود حماية المتصفح (CORS)
-                self.send_header('Access-Control-Allow-Origin', '*') 
+                self.send_header('Location', video_direct_url)
+                self.send_header('Access-Control-Allow-Origin', '*') # لضمان عمله على كافة التطبيقات دون قيود
                 self.end_headers()
+                return
             else:
-                # في حال فشل القنص لأي سبب، يتم تحويله للرابط الثابت الذي أرسلته كاحتياط مؤقت
-                self.send_response(302)
-                self.send_header('Location', 'https://shd-gcp-live-orng.shahid.net/live/bitmovin-mbc-1-na/eec141533c90dd34722c503a296dd0d8/index.m3u8')
+                # في حال لم يجد السكريبت رابط البث داخل الصفحة
+                self.send_response(404)
+                self.send_header('Content-type', 'text/plain; charset=utf-8')
                 self.end_headers()
-                
-        except Exception as e:
-            # في حال حدوث خطأ في الاتصال بالسيرفر
+                self.wfile.write("عذراً، لم يتم العثور على رابط m3u8 نشط في هذه الصفحة.".encode('utf-8'))
+                return
+        except:
+            # في حال حدوث مشكلة في الاتصال بالسيرفر الأصلي
             self.send_response(500)
             self.end_headers()
+            return
